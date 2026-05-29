@@ -1,6 +1,8 @@
 use std::{fmt::Write as _, io::Write as _, os::unix::ffi::OsStrExt as _};
 
 use anyhow::Context as _;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 // The default number of seconds the generated TOTP
 // code lasts for before a new one must be generated
@@ -335,19 +337,82 @@ impl From<DecryptedSearchCipher> for DecryptedListCipher {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+/// Custom field type
+#[derive(JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SchemaFieldType {
+    /// Plain text field
+    Text,
+    /// Hidden/secret field (masked in UI)
+    Hidden,
+    /// Boolean (true/false) field
+    Boolean,
+    /// Linked field
+    Linked,
+}
+
+/// URI match rule
+#[derive(JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SchemaUriMatchType {
+    /// Match the domain (and subdomains) of the URI
+    Domain,
+    /// Match the exact host (including port)
+    Host,
+    /// Match if the URI starts with this string
+    StartsWith,
+    /// Match the exact URI
+    Exact,
+    /// Match using a regular expression
+    RegularExpression,
+    /// Never match this URI
+    Never,
+}
+
+/// A decrypted Bitwarden cipher entry
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(Eq, PartialEq))]
 struct DecryptedCipher {
+    /// The unique identifier (UUID) of this entry. Leave empty when creating a new entry.
+    #[serde(default)]
+    #[schemars(title = "ID")]
     id: String,
+    /// The unique identifier (UUID) of the organization this entry belongs to. Leave null for personal vault.
+    #[serde(default)]
+    #[schemars(title = "Organization ID")]
+    organization_id: Option<String>,
+    /// The name of the folder to put this entry in. If the folder doesn't exist, it will be created.
+    #[schemars(title = "Folder")]
     folder: Option<String>,
+    /// The name of this entry (e.g. the name of the website or service).
+    #[schemars(title = "Name")]
     name: String,
+    /// The type-specific data of this entry (`Login`, `Card`, `Identity`, `SecureNote`, or `SshKey`).
+    #[schemars(title = "Entry Data")]
     data: DecryptedData,
+    /// Custom fields associated with this entry.
+    #[serde(default)]
+    #[schemars(title = "Custom Fields")]
     fields: Vec<DecryptedField>,
+    /// Notes or description for this entry.
+    #[schemars(title = "Notes")]
     notes: Option<String>,
+    /// Password history for this entry (only updated if the password changes).
+    #[serde(default)]
+    #[schemars(title = "Password History")]
     history: Vec<DecryptedHistoryEntry>,
 }
 
 impl DecryptedCipher {
+    fn display_custom_field(&self, field: &str, clipboard: bool) {
+        for f in &self.fields {
+            if f.name.to_lowercase().as_str().contains(field) {
+                val_display_or_store(clipboard, &f.value);
+                break;
+            }
+        }
+    }
     fn display_short(&self, desc: &str, clipboard: bool) -> bool {
         match &self.data {
             DecryptedData::Login { password, .. } => {
@@ -451,17 +516,7 @@ impl DecryptedCipher {
                     self.display_short(desc, clipboard);
                 }
                 _ => {
-                    for f in &self.fields {
-                        if let Some(name) = &f.name {
-                            if name.to_lowercase().as_str().contains(field) {
-                                val_display_or_store(
-                                    clipboard,
-                                    f.value.as_deref().unwrap_or(""),
-                                );
-                                break;
-                            }
-                        }
-                    }
+                    self.display_custom_field(field, clipboard);
                 }
             },
             DecryptedData::Card {
@@ -514,17 +569,7 @@ impl DecryptedCipher {
                     }
                 }
                 _ => {
-                    for f in &self.fields {
-                        if let Some(name) = &f.name {
-                            if name.to_lowercase().as_str().contains(field) {
-                                val_display_or_store(
-                                    clipboard,
-                                    f.value.as_deref().unwrap_or(""),
-                                );
-                                break;
-                            }
-                        }
-                    }
+                    self.display_custom_field(field, clipboard);
                 }
             },
             DecryptedData::Identity {
@@ -617,17 +662,7 @@ impl DecryptedCipher {
                     }
                 }
                 _ => {
-                    for f in &self.fields {
-                        if let Some(name) = &f.name {
-                            if name.to_lowercase().as_str().contains(field) {
-                                val_display_or_store(
-                                    clipboard,
-                                    f.value.as_deref().unwrap_or(""),
-                                );
-                                break;
-                            }
-                        }
-                    }
+                    self.display_custom_field(field, clipboard);
                 }
             },
             DecryptedData::SecureNote => match field.parse() {
@@ -635,17 +670,7 @@ impl DecryptedCipher {
                     self.display_short(desc, clipboard);
                 }
                 _ => {
-                    for f in &self.fields {
-                        if let Some(name) = &f.name {
-                            if name.to_lowercase().as_str().contains(field) {
-                                val_display_or_store(
-                                    clipboard,
-                                    f.value.as_deref().unwrap_or(""),
-                                );
-                                break;
-                            }
-                        }
-                    }
+                    self.display_custom_field(field, clipboard);
                 }
             },
             DecryptedData::SshKey {
@@ -672,17 +697,7 @@ impl DecryptedCipher {
                     }
                 }
                 _ => {
-                    for f in &self.fields {
-                        if let Some(name) = &f.name {
-                            if name.to_lowercase().as_str().contains(field) {
-                                val_display_or_store(
-                                    clipboard,
-                                    f.value.as_deref().unwrap_or(""),
-                                );
-                                break;
-                            }
-                        }
-                    }
+                    self.display_custom_field(field, clipboard);
                 }
             },
         }
@@ -718,8 +733,8 @@ impl DecryptedCipher {
 
                 for field in &self.fields {
                     displayed |= display_field(
-                        field.name.as_deref().unwrap_or("(null)"),
-                        Some(field.value.as_deref().unwrap_or("")),
+                        &field.name,
+                        Some(&field.value),
                         clipboard,
                     );
                 }
@@ -837,8 +852,8 @@ impl DecryptedCipher {
 
                 for field in &self.fields {
                     displayed |= display_field(
-                        field.name.as_deref().unwrap_or("(null)"),
-                        Some(field.value.as_deref().unwrap_or("")),
+                        &field.name,
+                        Some(&field.value),
                         clipboard,
                     );
                 }
@@ -988,14 +1003,20 @@ impl DecryptedCipher {
             println!("{}", Field::Notes);
         }
         for f in &self.fields {
-            if let Some(name) = &f.name {
-                println!("{name}");
-            }
+            println!("{}", f.name);
         }
     }
 
     fn display_json(&self, desc: &str) -> anyhow::Result<()> {
         serde_json::to_writer_pretty(std::io::stdout(), &self)
+            .context(format!("failed to write entry '{desc}' to stdout"))?;
+        println!();
+
+        Ok(())
+    }
+
+    fn display_yaml(&self, desc: &str) -> anyhow::Result<()> {
+        serde_yaml::to_writer(std::io::stdout(), &self)
             .context(format!("failed to write entry '{desc}' to stdout"))?;
         println!();
 
@@ -1018,94 +1039,328 @@ fn val_display_or_store(clipboard: bool, password: &str) -> bool {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+/// Type-specific data of the entry
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(Eq, PartialEq))]
 enum DecryptedData {
+    /// Login credentials (username, password, TOTP, URIs)
+    #[schemars(title = "Login")]
     Login {
+        /// The login username
+        #[schemars(title = "Username")]
         username: Option<String>,
+        /// The login password
+        #[schemars(title = "Password")]
         password: Option<String>,
+        /// The TOTP (Time-based One-Time Password) secret key
+        #[schemars(title = "TOTP Secret")]
         totp: Option<String>,
+        /// URIs (URLs) associated with this login
+        #[schemars(title = "URIs")]
         uris: Option<Vec<DecryptedUri>>,
     },
+    /// Credit/debit card details
+    #[schemars(title = "Card")]
     Card {
+        /// The name on the card
+        #[schemars(title = "Cardholder Name")]
         cardholder_name: Option<String>,
+        /// The card number
+        #[schemars(title = "Card Number")]
         number: Option<String>,
+        /// The card brand (e.g. Visa, Mastercard)
+        #[schemars(title = "Brand")]
         brand: Option<String>,
+        /// The expiration month (MM)
+        #[schemars(title = "Expiration Month")]
         exp_month: Option<String>,
+        /// The expiration year (YYYY)
+        #[schemars(title = "Expiration Year")]
         exp_year: Option<String>,
+        /// The security code (CVV/CVC)
+        #[schemars(title = "Security Code (CVV)")]
         code: Option<String>,
     },
+    /// Identity/personal details
+    #[schemars(title = "Identity")]
     Identity {
+        /// Honorific title (e.g. Mr., Ms.)
+        #[schemars(title = "Title")]
         title: Option<String>,
+        /// First name
+        #[schemars(title = "First Name")]
         first_name: Option<String>,
+        /// Middle name
+        #[schemars(title = "Middle Name")]
         middle_name: Option<String>,
+        /// Last name
+        #[schemars(title = "Last Name")]
         last_name: Option<String>,
+        /// Address line 1
+        #[schemars(title = "Address Line 1")]
         address1: Option<String>,
+        /// Address line 2
+        #[schemars(title = "Address Line 2")]
         address2: Option<String>,
+        /// Address line 3
+        #[schemars(title = "Address Line 3")]
         address3: Option<String>,
+        /// City
+        #[schemars(title = "City")]
         city: Option<String>,
+        /// State/Province
+        #[schemars(title = "State/Province")]
         state: Option<String>,
+        /// Postal/ZIP code
+        #[schemars(title = "Postal/ZIP Code")]
         postal_code: Option<String>,
+        /// Country
+        #[schemars(title = "Country")]
         country: Option<String>,
+        /// Phone number
+        #[schemars(title = "Phone")]
         phone: Option<String>,
+        /// Email address
+        #[schemars(title = "Email")]
         email: Option<String>,
+        /// Social Security Number (SSN) or equivalent
+        #[schemars(title = "SSN")]
         ssn: Option<String>,
+        /// Driver's license number
+        #[schemars(title = "Driver's License")]
         license_number: Option<String>,
+        /// Passport number
+        #[schemars(title = "Passport Number")]
         passport_number: Option<String>,
+        /// Preferred username
+        #[schemars(title = "Username")]
         username: Option<String>,
     },
+    /// A secure text note
+    #[schemars(title = "Secure Note")]
     SecureNote,
+    /// SSH Key credentials
+    #[schemars(title = "SSH Key")]
     SshKey {
+        /// The SSH public key
+        #[schemars(title = "Public Key")]
         public_key: Option<String>,
+        /// The SSH key fingerprint
+        #[schemars(title = "Fingerprint")]
         fingerprint: Option<String>,
+        /// The SSH private key
+        #[schemars(title = "Private Key")]
         private_key: Option<String>,
     },
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+/// A custom field associated with the entry
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(test, derive(Eq, PartialEq))]
 struct DecryptedField {
-    name: Option<String>,
-    value: Option<String>,
-    #[serde(serialize_with = "serialize_field_type", rename = "type")]
-    ty: Option<rbw::api::FieldType>,
+    /// The name of the custom field
+    #[schemars(title = "Field Name")]
+    name: String,
+    /// The value of the custom field
+    #[schemars(title = "Field Value")]
+    value: String,
+    /// The type of the custom field
+    #[serde(
+        serialize_with = "serialize_field_type",
+        deserialize_with = "deserialize_field_type",
+        rename = "type"
+    )]
+    #[schemars(with = "SchemaFieldType", title = "Field Type")]
+    ty: rbw::api::FieldType,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref, clippy::ref_option)]
 fn serialize_field_type<S>(
-    ty: &Option<rbw::api::FieldType>,
+    ty: &rbw::api::FieldType,
     serializer: S,
 ) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
-    match ty {
-        Some(ty) => {
-            let s = match ty {
-                rbw::api::FieldType::Text => "text",
-                rbw::api::FieldType::Hidden => "hidden",
-                rbw::api::FieldType::Boolean => "boolean",
-                rbw::api::FieldType::Linked => "linked",
+    let s = match ty {
+        rbw::api::FieldType::Text => "text",
+        rbw::api::FieldType::Hidden => "hidden",
+        rbw::api::FieldType::Boolean => "boolean",
+        rbw::api::FieldType::Linked => "linked",
+    };
+    serializer.serialize_str(s)
+}
+
+fn deserialize_field_type<'de, D>(
+    deserializer: D,
+) -> Result<rbw::api::FieldType, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    match s.as_str() {
+        "text" => Ok(rbw::api::FieldType::Text),
+        "hidden" => Ok(rbw::api::FieldType::Hidden),
+        "boolean" => Ok(rbw::api::FieldType::Boolean),
+        "linked" => Ok(rbw::api::FieldType::Linked),
+        other => Err(serde::de::Error::unknown_variant(
+            other,
+            &["text", "hidden", "boolean", "linked"],
+        )),
+    }
+}
+
+/// A historic password entry
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(Eq, PartialEq))]
+struct DecryptedHistoryEntry {
+    /// The date when this password was last used (RFC3339 format)
+    #[schemars(title = "Last Used Date")]
+    last_used_date: String,
+    /// The historic password
+    #[schemars(title = "Password")]
+    password: String,
+}
+
+/// A URI associated with a login entry
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(Eq, PartialEq))]
+struct DecryptedUri {
+    /// The URI (URL)
+    #[schemars(title = "URI")]
+    uri: String,
+    /// The match type rule for this URI
+    #[serde(
+        serialize_with = "serialize_uri_match_type",
+        deserialize_with = "deserialize_uri_match_type"
+    )]
+    #[schemars(with = "Option<SchemaUriMatchType>", title = "Match Type")]
+    match_type: Option<rbw::api::UriMatchType>,
+}
+
+// We need custom serialization/deserialization for UriMatchType in user-facing DecryptedUri
+// because by default, UriMatchType derives Serialize_repr/Deserialize_repr (integers)
+// for Bitwarden API compatibility and local database cache (db.json) backwards compatibility.
+// Using custom serialize/deserialize allows us to present friendly strings (like "domain", "host")
+// to the user while keeping the internal integer representations intact.
+#[allow(clippy::trivially_copy_pass_by_ref, clippy::ref_option)]
+fn serialize_uri_match_type<S>(
+    match_type: &Option<rbw::api::UriMatchType>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match match_type {
+        Some(mt) => {
+            let s = match mt {
+                rbw::api::UriMatchType::Domain => "domain",
+                rbw::api::UriMatchType::Host => "host",
+                rbw::api::UriMatchType::StartsWith => "starts_with",
+                rbw::api::UriMatchType::Exact => "exact",
+                rbw::api::UriMatchType::RegularExpression => {
+                    "regular_expression"
+                }
+                rbw::api::UriMatchType::Never => "never",
             };
-            serializer.serialize_some(&Some(s))
+            serializer.serialize_some(s)
         }
         None => serializer.serialize_none(),
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[cfg_attr(test, derive(Eq, PartialEq))]
-struct DecryptedHistoryEntry {
-    last_used_date: String,
-    password: String,
-}
+fn deserialize_uri_match_type<'de, D>(
+    deserializer: D,
+) -> Result<Option<rbw::api::UriMatchType>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Visitor;
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = Option<rbw::api::UriMatchType>;
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[cfg_attr(test, derive(Eq, PartialEq))]
-struct DecryptedUri {
-    uri: String,
-    match_type: Option<rbw::api::UriMatchType>,
+        fn expecting(
+            &self,
+            formatter: &mut std::fmt::Formatter,
+        ) -> std::fmt::Result {
+            formatter.write_str("uri match type (string or integer)")
+        }
+
+        fn visit_str<E>(self, s: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            match s {
+                "domain" => Ok(Some(rbw::api::UriMatchType::Domain)),
+                "host" => Ok(Some(rbw::api::UriMatchType::Host)),
+                "starts_with" => Ok(Some(rbw::api::UriMatchType::StartsWith)),
+                "exact" => Ok(Some(rbw::api::UriMatchType::Exact)),
+                "regular_expression" => {
+                    Ok(Some(rbw::api::UriMatchType::RegularExpression))
+                }
+                "never" => Ok(Some(rbw::api::UriMatchType::Never)),
+                _ => Err(serde::de::Error::unknown_variant(
+                    s,
+                    &[
+                        "domain",
+                        "host",
+                        "starts_with",
+                        "exact",
+                        "regular_expression",
+                        "never",
+                    ],
+                )),
+            }
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            match v {
+                0 => Ok(Some(rbw::api::UriMatchType::Domain)),
+                1 => Ok(Some(rbw::api::UriMatchType::Host)),
+                2 => Ok(Some(rbw::api::UriMatchType::StartsWith)),
+                3 => Ok(Some(rbw::api::UriMatchType::Exact)),
+                4 => Ok(Some(rbw::api::UriMatchType::RegularExpression)),
+                5 => Ok(Some(rbw::api::UriMatchType::Never)),
+                _ => Err(serde::de::Error::invalid_value(
+                    serde::de::Unexpected::Unsigned(v),
+                    &"integer between 0 and 5",
+                )),
+            }
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_some<D>(
+            self,
+            deserializer: D,
+        ) -> Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(self)
+        }
+    }
+    deserializer.deserialize_any(Visitor)
 }
 
 fn matches_url(
@@ -1391,6 +1646,7 @@ pub fn get(
     field: Option<&str>,
     full: bool,
     raw: bool,
+    yaml: bool,
     clipboard: bool,
     ignore_case: bool,
     list_fields: bool,
@@ -1412,6 +1668,8 @@ pub fn get(
         decrypted.display_fields_list();
     } else if raw {
         decrypted.display_json(&desc)?;
+    } else if yaml {
+        decrypted.display_yaml(&desc)?;
     } else if full {
         decrypted.display_long(&desc, clipboard);
     } else if let Some(field) = field {
@@ -1507,8 +1765,7 @@ pub fn search(
         .filter(|entry| {
             entry
                 .as_ref()
-                .map(|entry| entry.search_match(term, folder))
-                .unwrap_or(true)
+                .map_or(true, |entry| entry.search_match(term, folder))
         })
         .map(|entry| entry.map(std::convert::Into::into))
         .collect::<Result<_, anyhow::Error>>()?;
@@ -1555,102 +1812,207 @@ pub fn code(
     Ok(())
 }
 
+fn get_or_create_folder(
+    access_token: &mut String,
+    refresh_token: &str,
+    db: &mut rbw::db::Db,
+    folder_name: &str,
+) -> anyhow::Result<Option<String>> {
+    let (new_access_token, folders) =
+        rbw::actions::list_folders(access_token, refresh_token)?;
+    if let Some(new_access_token) = new_access_token {
+        access_token.clone_from(&new_access_token);
+        db.access_token = Some(new_access_token);
+        save_db(db)?;
+    }
+
+    let folders: Vec<(String, String)> = folders
+        .iter()
+        .cloned()
+        .map(|(id, name)| {
+            Ok((id, crate::actions::decrypt(&name, None, None)?))
+        })
+        .collect::<anyhow::Result<_>>()?;
+
+    for (id, name) in folders {
+        if name == folder_name {
+            return Ok(Some(id));
+        }
+    }
+
+    let (new_access_token, id) = rbw::actions::create_folder(
+        access_token,
+        refresh_token,
+        &crate::actions::encrypt(folder_name, None)?,
+    )?;
+    if let Some(new_access_token) = new_access_token {
+        access_token.clone_from(&new_access_token);
+        db.access_token = Some(new_access_token);
+        save_db(db)?;
+    }
+    Ok(Some(id))
+}
+
 pub fn add(
-    name: &str,
+    name: Option<&str>,
     username: Option<&str>,
     uris: &[(String, Option<rbw::api::UriMatchType>)],
     folder: Option<&str>,
+    raw: bool,
+    yaml: bool,
 ) -> anyhow::Result<()> {
+    if !raw && !yaml && name.is_none() {
+        anyhow::bail!("Name is required unless using --raw or --yaml");
+    }
+
     unlock()?;
 
     let mut db = load_db()?;
     // unwrap is safe here because the call to unlock above is guaranteed to
     // populate these or error
     let mut access_token = db.access_token.as_ref().unwrap().clone();
-    let refresh_token = db.refresh_token.as_ref().unwrap();
+    let refresh_token = db.refresh_token.as_ref().unwrap().clone();
 
-    let name = crate::actions::encrypt(name, None)?;
+    if raw || yaml {
+        let template = DecryptedCipher {
+            id: String::new(),
+            organization_id: None,
+            folder: folder.map(String::from),
+            name: name.unwrap_or("").to_string(),
+            data: DecryptedData::Login {
+                username: username.map(String::from),
+                password: None,
+                totp: None,
+                uris: if uris.is_empty() {
+                    None
+                } else {
+                    Some(
+                        uris.iter()
+                            .map(|(u, mt)| DecryptedUri {
+                                uri: u.clone(),
+                                match_type: *mt,
+                            })
+                            .collect(),
+                    )
+                },
+            },
+            fields: Vec::new(),
+            notes: None,
+            history: Vec::new(),
+        };
 
-    let username = username
-        .map(|username| crate::actions::encrypt(username, None))
-        .transpose()?;
+        let edited = if yaml {
+            let schema = schemars::schema_for!(DecryptedCipher);
+            let schema_json = serde_json::to_string_pretty(&schema)?;
+            let mut contents = String::new();
+            contents
+                .push_str("# yaml-language-server: $schema=./schema.json\n");
+            contents.push_str(&serde_yaml::to_string(&template)?);
+            rbw::edit::edit(
+                &contents,
+                "",
+                "rbw.yaml",
+                &[("schema.json", &schema_json)],
+            )?
+        } else {
+            let contents = serde_json::to_string_pretty(&template)?;
+            rbw::edit::edit(&contents, "", "rbw.json", &[])?
+        };
 
-    let contents = rbw::edit::edit("", HELP_PW)?;
+        let decrypted: DecryptedCipher = if yaml {
+            serde_yaml::from_str(&edited)?
+        } else {
+            serde_json::from_str(&edited)?
+        };
 
-    let (password, notes) = parse_editor(&contents);
-    let password = password
-        .map(|password| crate::actions::encrypt(&password, None))
-        .transpose()?;
-    let notes = notes
-        .map(|notes| crate::actions::encrypt(&notes, None))
-        .transpose()?;
-    let uris: Vec<_> = uris
-        .iter()
-        .map(|uri| {
-            Ok(rbw::db::Uri {
-                uri: crate::actions::encrypt(&uri.0, None)?,
-                match_type: uri.1,
-            })
-        })
-        .collect::<anyhow::Result<_>>()?;
+        let (enc_name, enc_data, enc_fields, enc_notes, enc_history) =
+            encrypt_cipher(&decrypted, decrypted.organization_id.as_deref())?;
 
-    let mut folder_id = None;
-    if let Some(folder_name) = folder {
-        let (new_access_token, folders) =
-            rbw::actions::list_folders(&access_token, refresh_token)?;
-        if let Some(new_access_token) = new_access_token {
-            access_token.clone_from(&new_access_token);
-            db.access_token = Some(new_access_token);
+        let folder_id = if let Some(folder_name) = &decrypted.folder {
+            get_or_create_folder(
+                &mut access_token,
+                &refresh_token,
+                &mut db,
+                folder_name,
+            )?
+        } else {
+            None
+        };
+
+        if let (Some(access_token), ()) = rbw::actions::add(
+            &access_token,
+            &refresh_token,
+            decrypted.organization_id.as_deref(),
+            &enc_name,
+            &enc_data,
+            &enc_fields,
+            enc_notes.as_deref(),
+            folder_id.as_deref(),
+            &enc_history,
+        )? {
+            db.access_token = Some(access_token);
             save_db(&db)?;
         }
+    } else {
+        let name = name.unwrap();
+        let name = crate::actions::encrypt(name, None)?;
 
-        let folders: Vec<(String, String)> = folders
+        let username = username
+            .map(|username| crate::actions::encrypt(username, None))
+            .transpose()?;
+
+        let contents = rbw::edit::edit("", HELP_PW, "rbw", &[])?;
+
+        let (password, notes) = parse_editor(&contents);
+        let password = password
+            .map(|password| crate::actions::encrypt(&password, None))
+            .transpose()?;
+        let notes = notes
+            .map(|notes| crate::actions::encrypt(&notes, None))
+            .transpose()?;
+        let uris: Vec<_> = uris
             .iter()
-            .cloned()
-            .map(|(id, name)| {
-                Ok((id, crate::actions::decrypt(&name, None, None)?))
+            .map(|uri| {
+                Ok(rbw::db::Uri {
+                    uri: crate::actions::encrypt(&uri.0, None)?,
+                    match_type: uri.1,
+                })
             })
             .collect::<anyhow::Result<_>>()?;
 
-        for (id, name) in folders {
-            if name == folder_name {
-                folder_id = Some(id);
-            }
-        }
-        if folder_id.is_none() {
-            let (new_access_token, id) = rbw::actions::create_folder(
-                &access_token,
-                refresh_token,
-                &crate::actions::encrypt(folder_name, None)?,
-            )?;
-            if let Some(new_access_token) = new_access_token {
-                access_token.clone_from(&new_access_token);
-                db.access_token = Some(new_access_token);
-                save_db(&db)?;
-            }
-            folder_id = Some(id);
-        }
-    }
+        let folder_id = if let Some(folder_name) = folder {
+            get_or_create_folder(
+                &mut access_token,
+                &refresh_token,
+                &mut db,
+                folder_name,
+            )?
+        } else {
+            None
+        };
 
-    if let (Some(access_token), ()) = rbw::actions::add(
-        &access_token,
-        refresh_token,
-        &name,
-        &rbw::db::EntryData::Login {
-            username,
-            password,
-            uris,
-            totp: None,
-        },
-        notes.as_deref(),
-        folder_id.as_deref(),
-    )? {
-        db.access_token = Some(access_token);
-        save_db(&db)?;
+        if let (Some(access_token), ()) = rbw::actions::add(
+            &access_token,
+            &refresh_token,
+            None,
+            &name,
+            &rbw::db::EntryData::Login {
+                username,
+                password,
+                uris,
+                totp: None,
+            },
+            &[],
+            notes.as_deref(),
+            folder_id.as_deref(),
+            &[],
+        )? {
+            db.access_token = Some(access_token);
+            save_db(&db)?;
+        }
     }
 
     crate::actions::sync()?;
-
     Ok(())
 }
 
@@ -1672,13 +2034,13 @@ pub fn generate(
         // unwrap is safe here because the call to unlock above is guaranteed
         // to populate these or error
         let mut access_token = db.access_token.as_ref().unwrap().clone();
-        let refresh_token = db.refresh_token.as_ref().unwrap();
+        let refresh_token = db.refresh_token.as_ref().unwrap().clone();
 
         let name = crate::actions::encrypt(name, None)?;
         let username = username
             .map(|username| crate::actions::encrypt(username, None))
             .transpose()?;
-        let password = crate::actions::encrypt(&password, None)?;
+        let enc_password = crate::actions::encrypt(&password, None)?;
         let uris: Vec<_> = uris
             .iter()
             .map(|uri| {
@@ -1689,56 +2051,32 @@ pub fn generate(
             })
             .collect::<anyhow::Result<_>>()?;
 
-        let mut folder_id = None;
-        if let Some(folder_name) = folder {
-            let (new_access_token, folders) =
-                rbw::actions::list_folders(&access_token, refresh_token)?;
-            if let Some(new_access_token) = new_access_token {
-                access_token.clone_from(&new_access_token);
-                db.access_token = Some(new_access_token);
-                save_db(&db)?;
-            }
-
-            let folders: Vec<(String, String)> = folders
-                .iter()
-                .cloned()
-                .map(|(id, name)| {
-                    Ok((id, crate::actions::decrypt(&name, None, None)?))
-                })
-                .collect::<anyhow::Result<_>>()?;
-
-            for (id, name) in folders {
-                if name == folder_name {
-                    folder_id = Some(id);
-                }
-            }
-            if folder_id.is_none() {
-                let (new_access_token, id) = rbw::actions::create_folder(
-                    &access_token,
-                    refresh_token,
-                    &crate::actions::encrypt(folder_name, None)?,
-                )?;
-                if let Some(new_access_token) = new_access_token {
-                    access_token.clone_from(&new_access_token);
-                    db.access_token = Some(new_access_token);
-                    save_db(&db)?;
-                }
-                folder_id = Some(id);
-            }
-        }
+        let folder_id = if let Some(folder_name) = folder {
+            get_or_create_folder(
+                &mut access_token,
+                &refresh_token,
+                &mut db,
+                folder_name,
+            )?
+        } else {
+            None
+        };
 
         if let (Some(access_token), ()) = rbw::actions::add(
             &access_token,
-            refresh_token,
+            &refresh_token,
+            None,
             &name,
             &rbw::db::EntryData::Login {
                 username,
-                password: Some(password),
+                password: Some(enc_password),
                 uris,
                 totp: None,
             },
+            &[],
             None,
             folder_id.as_deref(),
+            &[],
         )? {
             db.access_token = Some(access_token);
             save_db(&db)?;
@@ -1755,12 +2093,14 @@ pub fn edit(
     username: Option<&str>,
     folder: Option<&str>,
     ignore_case: bool,
+    raw: bool,
+    yaml: bool,
 ) -> anyhow::Result<()> {
     unlock()?;
 
     let mut db = load_db()?;
-    let access_token = db.access_token.as_ref().unwrap();
-    let refresh_token = db.refresh_token.as_ref().unwrap();
+    let mut access_token = db.access_token.as_ref().unwrap().clone();
+    let refresh_token = db.refresh_token.as_ref().unwrap().clone();
 
     let desc = format!(
         "{}{}",
@@ -1768,107 +2108,182 @@ pub fn edit(
         name
     );
 
-    let (entry, decrypted) =
+    let (entry, decrypted_original) =
         find_entry(&db, name, username, folder, ignore_case)
             .with_context(|| format!("couldn't find entry for '{desc}'"))?;
 
-    let (data, fields, notes, history) = match &decrypted.data {
-        DecryptedData::Login { password, .. } => {
-            let mut contents =
-                format!("{}\n", password.as_deref().unwrap_or(""));
-            if let Some(notes) = decrypted.notes {
-                write!(contents, "\n{notes}\n").unwrap();
+    if raw || yaml {
+        let edited = if yaml {
+            let schema = schemars::schema_for!(DecryptedCipher);
+            let schema_json = serde_json::to_string_pretty(&schema)?;
+            let mut contents = String::new();
+            contents
+                .push_str("# yaml-language-server: $schema=./schema.json\n");
+            contents.push_str(&serde_yaml::to_string(&decrypted_original)?);
+            rbw::edit::edit(
+                &contents,
+                "",
+                "rbw.yaml",
+                &[("schema.json", &schema_json)],
+            )?
+        } else {
+            let contents = serde_json::to_string_pretty(&decrypted_original)?;
+            rbw::edit::edit(&contents, "", "rbw.json", &[])?
+        };
+
+        let decrypted_new: DecryptedCipher = if yaml {
+            serde_yaml::from_str(&edited)?
+        } else {
+            serde_json::from_str(&edited)?
+        };
+
+        if decrypted_new.id != decrypted_original.id {
+            log::warn!("Changing the ID in raw content is not supported and will be ignored.");
+        }
+
+        let (enc_name, enc_data, enc_fields, enc_notes, enc_history) =
+            encrypt_cipher(
+                &decrypted_new,
+                decrypted_new.organization_id.as_deref(),
+            )?;
+
+        let mut folder_id = entry.folder_id.clone();
+        if decrypted_new.folder != decrypted_original.folder {
+            if let Some(folder_name) = &decrypted_new.folder {
+                folder_id = get_or_create_folder(
+                    &mut access_token,
+                    &refresh_token,
+                    &mut db,
+                    folder_name,
+                )?;
+            } else {
+                folder_id = None;
             }
+        }
 
-            let contents = rbw::edit::edit(&contents, HELP_PW)?;
+        if let (Some(new_access_token), ()) = rbw::actions::edit(
+            &access_token,
+            &refresh_token,
+            &entry.id,
+            decrypted_new.organization_id.as_deref(),
+            &enc_name,
+            &enc_data,
+            &enc_fields,
+            enc_notes.as_deref(),
+            folder_id.as_deref(),
+            &enc_history,
+        )? {
+            db.access_token = Some(new_access_token);
+            save_db(&db)?;
+        }
+    } else {
+        let (data, fields, notes, history) = match &decrypted_original.data {
+            DecryptedData::Login { password, .. } => {
+                let mut contents =
+                    format!("{}\n", password.as_deref().unwrap_or(""));
+                if let Some(notes) = decrypted_original.notes.as_ref() {
+                    write!(contents, "\n{notes}\n").unwrap();
+                }
 
-            let (password, notes) = parse_editor(&contents);
-            let password = password
-                .map(|password| {
-                    crate::actions::encrypt(
-                        &password,
-                        entry.org_id.as_deref(),
-                    )
-                })
-                .transpose()?;
-            let notes = notes
-                .map(|notes| {
-                    crate::actions::encrypt(&notes, entry.org_id.as_deref())
-                })
-                .transpose()?;
-            let mut history = entry.history.clone();
-            let rbw::db::EntryData::Login {
-                username: entry_username,
-                password: entry_password,
-                uris: entry_uris,
-                totp: entry_totp,
-            } = &entry.data
-            else {
-                unreachable!();
-            };
+                let contents =
+                    rbw::edit::edit(&contents, HELP_PW, "rbw", &[])?;
 
-            if let Some(prev_password) = entry_password.clone() {
-                let new_history_entry = rbw::db::HistoryEntry {
-                    last_used_date: format!(
-                        "{}",
-                        humantime::format_rfc3339(
-                            std::time::SystemTime::now()
+                let (password, notes) = parse_editor(&contents);
+                let password = password
+                    .map(|password| {
+                        crate::actions::encrypt(
+                            &password,
+                            entry.org_id.as_deref(),
                         )
-                    ),
-                    password: prev_password,
+                    })
+                    .transpose()?;
+                let notes = notes
+                    .map(|notes| {
+                        crate::actions::encrypt(
+                            &notes,
+                            entry.org_id.as_deref(),
+                        )
+                    })
+                    .transpose()?;
+                let mut history = entry.history.clone();
+                let rbw::db::EntryData::Login {
+                    username: entry_username,
+                    password: entry_password,
+                    uris: entry_uris,
+                    totp: entry_totp,
+                } = &entry.data
+                else {
+                    unreachable!();
                 };
-                history.insert(0, new_history_entry);
+
+                if let Some(prev_password) = entry_password.clone() {
+                    let new_history_entry = rbw::db::HistoryEntry {
+                        last_used_date: format!(
+                            "{}",
+                            humantime::format_rfc3339(
+                                std::time::SystemTime::now()
+                            )
+                        ),
+                        password: prev_password,
+                    };
+                    history.insert(0, new_history_entry);
+                }
+
+                let data = rbw::db::EntryData::Login {
+                    username: entry_username.clone(),
+                    password,
+                    uris: entry_uris.clone(),
+                    totp: entry_totp.clone(),
+                };
+                (data, entry.fields.clone(), notes, history)
             }
+            DecryptedData::SecureNote => {
+                let data = rbw::db::EntryData::SecureNote {};
 
-            let data = rbw::db::EntryData::Login {
-                username: entry_username.clone(),
-                password,
-                uris: entry_uris.clone(),
-                totp: entry_totp.clone(),
-            };
-            (data, entry.fields, notes, history)
+                let editor_content =
+                    decrypted_original.notes.as_ref().map_or_else(
+                        || "\n".to_string(),
+                        |notes| format!("{notes}\n"),
+                    );
+                let contents =
+                    rbw::edit::edit(&editor_content, HELP_NOTES, "rbw", &[])?;
+
+                // prepend blank line to be parsed as pw by `parse_editor`
+                let (_, notes) = parse_editor(&format!("\n{contents}\n"));
+
+                let notes = notes
+                    .map(|notes| {
+                        crate::actions::encrypt(
+                            &notes,
+                            entry.org_id.as_deref(),
+                        )
+                    })
+                    .transpose()?;
+
+                (data, entry.fields.clone(), notes, entry.history.clone())
+            }
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "modifications are only supported for login and note entries"
+                ));
+            }
+        };
+
+        if let (Some(new_access_token), ()) = rbw::actions::edit(
+            &access_token,
+            &refresh_token,
+            &entry.id,
+            entry.org_id.as_deref(),
+            &entry.name,
+            &data,
+            &fields,
+            notes.as_deref(),
+            entry.folder_id.as_deref(),
+            &history,
+        )? {
+            db.access_token = Some(new_access_token);
+            save_db(&db)?;
         }
-        DecryptedData::SecureNote => {
-            let data = rbw::db::EntryData::SecureNote {};
-
-            let editor_content = decrypted.notes.map_or_else(
-                || "\n".to_string(),
-                |notes| format!("{notes}\n"),
-            );
-            let contents = rbw::edit::edit(&editor_content, HELP_NOTES)?;
-
-            // prepend blank line to be parsed as pw by `parse_editor`
-            let (_, notes) = parse_editor(&format!("\n{contents}\n"));
-
-            let notes = notes
-                .map(|notes| {
-                    crate::actions::encrypt(&notes, entry.org_id.as_deref())
-                })
-                .transpose()?;
-
-            (data, entry.fields, notes, entry.history)
-        }
-        _ => {
-            return Err(anyhow::anyhow!(
-                "modifications are only supported for login and note entries"
-            ));
-        }
-    };
-
-    if let (Some(access_token), ()) = rbw::actions::edit(
-        access_token,
-        refresh_token,
-        &entry.id,
-        entry.org_id.as_deref(),
-        &entry.name,
-        &data,
-        &fields,
-        notes.as_deref(),
-        entry.folder_id.as_deref(),
-        &history,
-    )? {
-        db.access_token = Some(access_token);
-        save_db(&db)?;
     }
 
     crate::actions::sync()?;
@@ -2297,6 +2712,162 @@ fn decrypt_search_cipher(
     })
 }
 
+#[allow(clippy::ref_option)]
+fn encrypt_field(
+    field: &Option<String>,
+    org_id: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    field
+        .as_deref()
+        .map(|v| crate::actions::encrypt(v, org_id))
+        .transpose()
+}
+
+fn encrypt_cipher(
+    decrypted: &DecryptedCipher,
+    org_id: Option<&str>,
+) -> anyhow::Result<(
+    String,                     // encrypted name
+    rbw::db::EntryData,         // encrypted data
+    Vec<rbw::db::Field>,        // encrypted fields
+    Option<String>,             // encrypted notes
+    Vec<rbw::db::HistoryEntry>, // encrypted history
+)> {
+    let name = crate::actions::encrypt(&decrypted.name, org_id)?;
+    let notes = decrypted
+        .notes
+        .as_deref()
+        .map(|notes| crate::actions::encrypt(notes, org_id))
+        .transpose()?;
+
+    let fields = decrypted
+        .fields
+        .iter()
+        .map(|field| {
+            Ok(rbw::db::Field {
+                ty: Some(field.ty),
+                name: Some(crate::actions::encrypt(&field.name, org_id)?),
+                value: Some(crate::actions::encrypt(&field.value, org_id)?),
+                linked_id: None,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let history = decrypted
+        .history
+        .iter()
+        .map(|history_entry| {
+            Ok(rbw::db::HistoryEntry {
+                last_used_date: history_entry.last_used_date.clone(),
+                password: crate::actions::encrypt(
+                    &history_entry.password,
+                    org_id,
+                )?,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let data = match &decrypted.data {
+        DecryptedData::Login {
+            username,
+            password,
+            totp,
+            uris,
+        } => {
+            let username = encrypt_field(username, org_id)?;
+            let password = encrypt_field(password, org_id)?;
+            let totp = encrypt_field(totp, org_id)?;
+            let uris = uris
+                .as_ref()
+                .map(|uris| {
+                    uris.iter()
+                        .map(|uri| {
+                            Ok(rbw::db::Uri {
+                                uri: crate::actions::encrypt(
+                                    &uri.uri, org_id,
+                                )?,
+                                match_type: uri.match_type,
+                            })
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+
+            rbw::db::EntryData::Login {
+                username,
+                password,
+                totp,
+                uris,
+            }
+        }
+        DecryptedData::Card {
+            cardholder_name,
+            number,
+            brand,
+            exp_month,
+            exp_year,
+            code,
+        } => rbw::db::EntryData::Card {
+            cardholder_name: encrypt_field(cardholder_name, org_id)?,
+            number: encrypt_field(number, org_id)?,
+            brand: encrypt_field(brand, org_id)?,
+            exp_month: encrypt_field(exp_month, org_id)?,
+            exp_year: encrypt_field(exp_year, org_id)?,
+            code: encrypt_field(code, org_id)?,
+        },
+        DecryptedData::Identity {
+            title,
+            first_name,
+            middle_name,
+            last_name,
+            address1,
+            address2,
+            address3,
+            city,
+            state,
+            postal_code,
+            country,
+            phone,
+            email,
+            ssn,
+            license_number,
+            passport_number,
+            username,
+        } => rbw::db::EntryData::Identity {
+            title: encrypt_field(title, org_id)?,
+            first_name: encrypt_field(first_name, org_id)?,
+            middle_name: encrypt_field(middle_name, org_id)?,
+            last_name: encrypt_field(last_name, org_id)?,
+            address1: encrypt_field(address1, org_id)?,
+            address2: encrypt_field(address2, org_id)?,
+            address3: encrypt_field(address3, org_id)?,
+            city: encrypt_field(city, org_id)?,
+            state: encrypt_field(state, org_id)?,
+            postal_code: encrypt_field(postal_code, org_id)?,
+            country: encrypt_field(country, org_id)?,
+            phone: encrypt_field(phone, org_id)?,
+            email: encrypt_field(email, org_id)?,
+            ssn: encrypt_field(ssn, org_id)?,
+            license_number: encrypt_field(license_number, org_id)?,
+            passport_number: encrypt_field(passport_number, org_id)?,
+            username: encrypt_field(username, org_id)?,
+        },
+        DecryptedData::SecureNote => rbw::db::EntryData::SecureNote,
+        DecryptedData::SshKey {
+            public_key,
+            fingerprint,
+            private_key,
+        } => rbw::db::EntryData::SshKey {
+            public_key: encrypt_field(public_key, org_id)?,
+            fingerprint: encrypt_field(fingerprint, org_id)?,
+            private_key: encrypt_field(private_key, org_id)?,
+        },
+    };
+
+    Ok((name, data, fields, notes, history))
+}
+
 fn decrypt_cipher(entry: &rbw::db::Entry) -> anyhow::Result<DecryptedCipher> {
     // folder name should always be decrypted with the local key because
     // folders are local to a specific user's vault, not the organization
@@ -2327,7 +2898,8 @@ fn decrypt_cipher(entry: &rbw::db::Entry) -> anyhow::Result<DecryptedCipher> {
                             entry.org_id.as_deref(),
                         )
                     })
-                    .transpose()?,
+                    .transpose()?
+                    .unwrap_or_default(),
                 value: field
                     .value
                     .as_ref()
@@ -2338,8 +2910,9 @@ fn decrypt_cipher(entry: &rbw::db::Entry) -> anyhow::Result<DecryptedCipher> {
                             entry.org_id.as_deref(),
                         )
                     })
-                    .transpose()?,
-                ty: field.ty,
+                    .transpose()?
+                    .unwrap_or_default(),
+                ty: field.ty.unwrap_or(rbw::api::FieldType::Text),
             })
         })
         .collect::<anyhow::Result<_>>()?;
@@ -2613,6 +3186,7 @@ fn decrypt_cipher(entry: &rbw::db::Entry) -> anyhow::Result<DecryptedCipher> {
 
     Ok(DecryptedCipher {
         id: entry.id.clone(),
+        organization_id: entry.org_id.clone(),
         folder,
         name: crate::actions::decrypt(
             &entry.name,
@@ -2814,6 +3388,160 @@ fn display_field(name: &str, field: Option<&str>, clipboard: bool) -> bool {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn test_raw_yaml_serde() {
+        let original = DecryptedCipher {
+            id: "some-id".to_string(),
+            organization_id: Some("some-org".to_string()),
+            folder: Some("some-folder".to_string()),
+            name: "some-name".to_string(),
+            data: DecryptedData::Login {
+                username: Some("some-user".to_string()),
+                password: Some("some-password".to_string()),
+                totp: Some("some-totp".to_string()),
+                uris: Some(vec![
+                    DecryptedUri {
+                        uri: "http://example.com".to_string(),
+                        match_type: Some(rbw::api::UriMatchType::Domain),
+                    },
+                    DecryptedUri {
+                        uri: "http://example.org".to_string(),
+                        match_type: None,
+                    },
+                ]),
+            },
+            fields: vec![
+                DecryptedField {
+                    name: "field1".to_string(),
+                    value: "value1\nline2\nline3".to_string(),
+                    ty: rbw::api::FieldType::Text,
+                },
+                DecryptedField {
+                    name: "field2".to_string(),
+                    value: "value2".to_string(),
+                    ty: rbw::api::FieldType::Hidden,
+                },
+            ],
+            notes: Some("some-notes\nline2\nline3".to_string()),
+            history: vec![DecryptedHistoryEntry {
+                last_used_date: "2026-05-29T14:55:19-07:00".to_string(),
+                password: "old-password".to_string(),
+            }],
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string_pretty(&original).unwrap();
+        // Deserialize from JSON
+        let deserialized_json: DecryptedCipher =
+            serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized_json);
+
+        // Serialize to YAML
+        let yaml = serde_yaml::to_string(&original).unwrap();
+        // All multi-line strings should be block literals.
+        // In YAML, block literal starts with `|`
+        assert!(yaml.contains("notes: |"));
+        assert!(yaml.contains("value: |"));
+        assert!(yaml.contains("some-notes"));
+        assert!(yaml.contains("value1"));
+        assert!(yaml.contains("line2"));
+        assert!(yaml.contains("line3"));
+
+        // Deserialize from YAML
+        let deserialized_yaml: DecryptedCipher =
+            serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(original, deserialized_yaml);
+
+        // Test Schema Generation
+        let schema = schemars::schema_for!(DecryptedCipher);
+        let schema_json = serde_json::to_string_pretty(&schema).unwrap();
+        assert!(schema_json.contains("DecryptedCipher"));
+        assert!(schema_json.contains("organization_id"));
+        assert!(schema_json.contains("SchemaUriMatchType"));
+        assert!(schema_json.contains("Field Type"));
+    }
+
+    #[test]
+    fn test_strict_validation() {
+        // 1. Test unknown field in DecryptedCipher fails
+        let bad_cipher_json = r#"{
+            "id": "some-id",
+            "name": "some-name",
+            "data": {
+                "username": "some-user"
+            },
+            "unknown_field": "invalid"
+        }"#;
+        let res: Result<DecryptedCipher, _> =
+            serde_json::from_str(bad_cipher_json);
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field `unknown_field`"));
+
+        // 2. Test unknown field in DecryptedData (Login variant) fails
+        let bad_login_json = r#"{
+            "id": "some-id",
+            "name": "some-name",
+            "data": {
+                "username": "some-user",
+                "bad_field": "invalid"
+            }
+        }"#;
+        let res: Result<DecryptedCipher, _> =
+            serde_json::from_str(bad_login_json);
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("data did not match any variant")
+                || err_msg.contains("unknown field")
+        );
+
+        // 3. Test missing required field in DecryptedField fails
+        let missing_name_field_json = r#"{
+            "id": "some-id",
+            "name": "some-name",
+            "data": {
+                "username": "some-user"
+            },
+            "fields": [
+                {
+                    "value": "some-value",
+                    "type": "text"
+                }
+            ]
+        }"#;
+        let res: Result<DecryptedCipher, _> =
+            serde_json::from_str(missing_name_field_json);
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("missing field `name`"));
+
+        let missing_type_field_json = r#"{
+            "id": "some-id",
+            "name": "some-name",
+            "data": {
+                "username": "some-user"
+            },
+            "fields": [
+                {
+                    "name": "some-name",
+                    "value": "some-value"
+                }
+            ]
+        }"#;
+        let res: Result<DecryptedCipher, _> =
+            serde_json::from_str(missing_type_field_json);
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("missing field `type`"));
+    }
 
     #[test]
     fn test_find_entry() {

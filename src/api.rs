@@ -750,9 +750,11 @@ struct SyncResPasswordHistory {
 #[derive(serde::Serialize, Debug)]
 struct CiphersPostReq {
     #[serde(rename = "type")]
-    ty: u32, // XXX what are the valid types?
+    ty: u32,
     #[serde(rename = "folderId")]
     folder_id: Option<String>,
+    #[serde(rename = "organizationId")]
+    organization_id: Option<String>,
     name: String,
     notes: Option<String>,
     login: Option<CipherLogin>,
@@ -760,6 +762,9 @@ struct CiphersPostReq {
     identity: Option<CipherIdentity>,
     #[serde(rename = "secureNote")]
     secure_note: Option<CipherSecureNote>,
+    fields: Vec<CipherField>,
+    #[serde(rename = "passwordHistory")]
+    password_history: Vec<CiphersPutReqHistory>,
 }
 
 #[derive(serde::Serialize, Debug)]
@@ -1197,20 +1202,46 @@ impl Client {
     pub fn add(
         &self,
         access_token: &str,
+        org_id: Option<&str>,
         name: &str,
         data: &crate::db::EntryData,
+        fields: &[crate::db::Field],
         notes: Option<&str>,
         folder_id: Option<&str>,
+        history: &[crate::db::HistoryEntry],
     ) -> Result<()> {
         let mut req = CiphersPostReq {
-            ty: 1,
+            ty: match data {
+                crate::db::EntryData::Login { .. } => 1,
+                crate::db::EntryData::SecureNote => 2,
+                crate::db::EntryData::Card { .. } => 3,
+                crate::db::EntryData::Identity { .. } => 4,
+                crate::db::EntryData::SshKey { .. } => unreachable!(),
+            },
             folder_id: folder_id.map(std::string::ToString::to_string),
+            organization_id: org_id.map(std::string::ToString::to_string),
             name: name.to_string(),
             notes: notes.map(std::string::ToString::to_string),
             login: None,
             card: None,
             identity: None,
             secure_note: None,
+            fields: fields
+                .iter()
+                .map(|field| CipherField {
+                    ty: field.ty,
+                    name: field.name.clone(),
+                    value: field.value.clone(),
+                    linked_id: field.linked_id,
+                })
+                .collect(),
+            password_history: history
+                .iter()
+                .map(|entry| CiphersPutReqHistory {
+                    last_used_date: entry.last_used_date.clone(),
+                    password: entry.password.clone(),
+                })
+                .collect(),
         };
         match data {
             crate::db::EntryData::Login {
@@ -1738,23 +1769,19 @@ fn classify_login_error(error_res: &ConnectErrorRes, code: u16) -> Error {
         "invalid_client" => {
             return Error::IncorrectApiKey;
         }
-        "" => {
+        "" if error_desc.is_none() || error_desc == Some("") => {
             // bitwarden_rs returns an empty error and error_description for
             // this case, for some reason
-            if error_desc.is_none() || error_desc == Some("") {
-                if let Some(error_model) = error_res.error_model.as_ref() {
-                    let message = error_model.message.as_str().to_string();
-                    match message.as_str() {
-                        "Username or password is incorrect. Try again"
-                        | "TOTP code is not a number" => {
+            if let Some(error_model) = error_res.error_model.as_ref() {
+                let message = error_model.message.as_str().to_string();
+                match message.as_str() {
+                    "Username or password is incorrect. Try again"
+                    | "TOTP code is not a number" => {
+                        return Error::IncorrectPassword { message };
+                    }
+                    s => {
+                        if s.starts_with("Invalid TOTP code! Server time: ") {
                             return Error::IncorrectPassword { message };
-                        }
-                        s => {
-                            if s.starts_with(
-                                "Invalid TOTP code! Server time: ",
-                            ) {
-                                return Error::IncorrectPassword { message };
-                            }
                         }
                     }
                 }
